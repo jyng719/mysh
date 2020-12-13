@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
@@ -12,12 +13,15 @@
 #define WRITE 1
 #define MAX 1024
 
-int fd, pid, child, status, amper;
+int fd, pid, child, status, amper, fg = 0;
 int backgroundIndex, leftIndex, rightIndex, pipeIndex; // &, <, >, | index 변수들
+int fdPipe[2];
 char str[MAX]; // 사용자 입력 저장
 char* command1[MAX];
 char* command2[MAX];
-int fdPipe[2];
+char* bgCmdList[MAX]; // 백그라운드 프로세스 이름 리스트
+int bgPidList[MAX] = {0}; // 백그라운드 프로세스 ID 리스트
+int bgCount = 0; // 백그라운드 프로세스 개수
 int argc; // 명령 인수 저장
 char* argv[MAX]; // 명령 인자 저장
 
@@ -28,7 +32,6 @@ void init() // 초기화
 	leftIndex = 0;
 	rightIndex = 0;
 	pipeIndex = 0;
-	//argc = 0;
 	memset(argv, '\0', MAX);
 	memset(str, '\0', MAX);
 	memset(command1, '\0', MAX);
@@ -82,27 +85,37 @@ void cheakIndex(int argc, char* argv[]) // &, <, >, | 체크해서 index 저장
 	}
 }
 
-/*void redir(int argc, char* argv[])
+void myjobs() // 현재 백그라운드 명령어들과 그들의 pid 출력
 {
-	int child, pid, fd, status;
-	pid = fork();
-	if (pid == 0)
+	printf("Background Count : [%d]\n", bgCount);
+	for(int i = 0; i < bgCount; i++)
+		printf("[현재 Background] : %s\t\t [Process ID] : %d\n", bgCmdList[i], bgPidList[i]);
+}
+
+void chldsignal() // 시그널 핸들러
+{
+	int pid, status;
+	pid = waitpid(-1, &status, 0); // 임의의 자식 프로세스를 기다림
+	for(int i = 0; i < bgCount; i++) // 백그라운드 프로세스 리스트에 존재하는지 체크
 	{
-		fd = open(argv[0],O_CREAT|O_TRUNC|O_WRONLY, 0600);
-		dup2(fd, 1); // 파일을 표준출력에 복제
-		close(fd);
-		execvp(argv[1], &argv[1]);
-		fprintf(stderr, "%s:실행 불가\n",argv[1]);
+		if (pid == bgPidList[i]) // 백그라운드 프로세스 종료 시
+		{
+			// 백그라운드 프로세스 리스트에서 삭제
+			free(bgCmdList[i]); // 종료된 프로세스 이름 공간 할당 해제
+			bgCmdList[i] = bgCmdList[bgCount - 1]; // 마지막에 있는 이름 가져오기
+			bgCmdList[bgCount - 1] = NULL; // 마지막에 있는 이름 삭제
+			bgPidList[i] = bgPidList[bgCount - 1]; // 마지막에 있는 pid값 가져오기
+			bgPidList[bgCount - 1] = 0; // 마지막에 있는 pid 삭제
+			bgCount--;
+			return;
+		}
 	}
-	else
-	{
-		child = wait(&status);
-		printf("[%d] 자식 프로세스 %d 종료 \n", getpid(), child);
-	}
-}*/
+	fg = 0;	// 포그라운드 프로세스 종료 시 fg를 0으로
+}
 
 int main()
 {
+	signal(SIGCHLD, chldsignal); // 시그널 핸들러 등록
 	while(1)
 	{
 		// 초기화
@@ -119,6 +132,13 @@ int main()
 		if(strcmp(argv[0], "exit") == 0 || strcmp(argv[0], "logout") == 0)
 			exit(0);
 
+		// myjobs
+		if(strcmp(argv[0], "myjobs") == 0)
+		{
+			myjobs();
+			continue;
+		}
+
 		// &, <, >, | 체크
 		cheakIndex(argc, argv);
 
@@ -133,11 +153,6 @@ int main()
 			}
 			argc = argc - count;
 		}
-		// debug
-		/*for(int i = 0; i < argc; i++)
-		{
-			printf("%s ", argv[i]);
-		}*/
 
 		// 자식 생성
 		pid = fork();
@@ -159,9 +174,6 @@ int main()
 					}
 					command1[i] = argv[i];
 				}
-				/*execvp(command1[0], command1); // < 없는 command 실행
-				fprintf(stderr, "%s:실행 불가\n", command1[0]);
-				exit(1);*/
 			}
 			else if(rightIndex > 0) // >
 			{
@@ -170,9 +182,6 @@ int main()
 				close(fd);
 				for(int i = 0; i < rightIndex; i++) // command에서 > 지우기
 					command1[i] = argv[i];
-				/*execvp(command1[0], command1); // > 없는 command 실행
-				fprintf(stderr, "%s:실행 불가\n", command1[0]);
-				exit(1);*/
 			}
 			// 파이프 체크
 			if(pipeIndex > 0)
@@ -211,9 +220,20 @@ int main()
 		else // 부모일 경우
 		{
 			// amper 체크
-			if(amper == 0)
-				//child = wait(&status); // 포그라운드 명령이면 자식을 기다림
-				child = waitpid(pid, &status, 0); // 포그라운드 명령이면 자식을 기다림
+			if(amper == 0) // 포그라운드 명령일 경우
+			{
+				fg = 1; // 포그라운드 마킹
+				while(fg == 1) // 포그라운드 명령이 끝나기 전까지
+					pause(); // 멈춤
+			}
+			else // 백그라운드 명령일 경우
+			{
+				bgCmdList[bgCount] = malloc(sizeof(char) * MAX); // free 잊지말것
+				strcpy(bgCmdList[bgCount], argv[0]); // 프로그램 이름 저장
+				bgPidList[bgCount] = pid; // 프로세스 ID 저장
+				bgCount++;
+			}
+
 		}
 	}
 }
